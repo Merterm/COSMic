@@ -1,0 +1,367 @@
+"""
+#########################################################
+extract_vilbert_features.py
+
+Description: Uses ViLBERT to extract visio-linguistic features from the images
+
+Dependencies:
+    - pytorch
+    - vilbert
+    - maskrcnn
+
+Author: Baber Khalid and Mert Inan
+Date: 5 Apr 2021
+
+Usage without loaded images:
+python extract_vilbert_features.py
+
+#########################################################
+"""
+import sys
+import os
+import torch
+import yaml
+import random
+
+from easydict import EasyDict as edict
+from pytorch_transformers.tokenization_bert import BertTokenizer
+from vilbert.vilbert import VILBertForVLTasks, BertConfig
+from vilbert.optimization import RAdam
+
+import numpy as np
+import matplotlib.pyplot as plt
+import PIL
+
+from maskrcnn_benchmark.config import cfg
+from maskrcnn_benchmark.layers import nms
+from maskrcnn_benchmark.modeling.detector import build_detection_model
+from maskrcnn_benchmark.structures.image_list import to_image_list
+from maskrcnn_benchmark.utils.model_serialization import load_state_dict
+from PIL import Image
+import cv2
+import argparse
+import glob
+from types import SimpleNamespace
+import pdb
+import argparse
+
+'''
+#_#_#_#_#_#_#_#_#_#_#_#_#_# PARAMETERS #_#_#_#_#_#_#_#_#_#_#_#
+'''
+filename = "data/arranged_cc_annotation.tsv"
+'''
+#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#
+'''
+class CaptionEvaluationModel(torch.nn.Module):
+    def __init__(self, pretrained_vilbert, model_name='', batch_size=1, max_seq_length=76):
+        super(CaptionEvaluationModel, self).__init__()
+        self.final_layer = torch.nn.Linear(76, 1)
+        self.batch_size = batch_size
+        self.pretrained_model = pretrained_vilbert
+        self.zero_excess = True if "vil_cosmic_plus" in model_name else False
+    
+    def forward(self, tokens, info_and_features):
+        lengths = [len(sen_tokens) for sen_tokens in tokens]
+        linguistic_logits = prediction(tokens, info_and_features, self.pretrained_model)[8].view(len(tokens), -1)
+        if self.zero_excess:
+            for i, max_len in enumerate(lengths):
+                linguistic_logits[i, max_len:] = 0
+                
+        raw_score = self.final_layer(linguistic_logits)
+        return torch.sigmoid(raw_score)
+'''
+#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_##_#_#_#_#_#_#_#_#_#_#_#
+#                     Evaluation Model Definition                #
+#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_##_#_#_#_#_#_#_#_#_#_#_#
+'''
+# class CaptionEvaluationModel(torch.nn.Module):
+#     def __init__(self, pretrained_vilbert, batch_size=1, max_seq_length=76):
+#         super()
+#         self.final_layer = torch.nn.Linear(76, 1)
+#         self.batch_size = batch_size
+#         self.pretrained_model = pretrained_vilbert
+    
+#     def forward(self, tokens, info_and_features):
+#         linguistic_logits = prediction(tokens, info_and_features, self.pretrained_model)[8].view(self.batch_size, -1)
+#         raw_score = self.final_layer(linguistic_logits)
+#         return torch.sigmoid(raw_score)
+
+'''
+#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_##_#_#_#_#_#_#_#_#_#_#_#
+#                         MODEL CREATION                        #
+#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_##_#_#_#_#_#_#_#_#_#_#_#
+'''
+def model_init():
+    args = SimpleNamespace(from_pretrained= "multi_task_model.bin",
+                           bert_model="bert-base-uncased",
+                           config_file="config/bert_base_6layer_6conect.json",
+                           max_seq_length=101,
+                           train_batch_size=4,
+                           do_lower_case=True,
+                           predict_feature=False,
+                           seed=42,
+                           num_workers=0,
+                           baseline=False,
+                           img_weight=1,
+                           distributed=False,
+                           objective=1,
+                           visual_target=0,
+                           dynamic_attention=False,
+                           task_specific_tokens=False,
+                           tasks='19',
+                           save_name='',
+                           in_memory=False,
+                           batch_size=4,
+                           local_rank=-1,
+                           split='mteval',
+                           clean_train_sets=True
+                        )
+    
+    config = BertConfig.from_json_file(args.config_file)
+    with open('./vilbert_tasks.yml', 'r') as f:
+        task_cfg = edict(yaml.safe_load(f))
+
+    task_names = []
+    for i, task_id in enumerate(args.tasks.split('-')):
+        task = 'TASK' + task_id
+        name = task_cfg[task]['name']
+        task_names.append(name)
+
+    timeStamp = args.from_pretrained.split('/')[-1] + '-' + args.save_name
+    config = BertConfig.from_json_file(args.config_file)
+    default_gpu=True
+
+    if args.predict_feature:
+        config.v_target_size = 2048
+        config.predict_feature = True
+    else:
+        config.v_target_size = 1601
+        config.predict_feature = False
+
+    if args.task_specific_tokens:
+        config.task_specific_tokens = True
+
+    if args.dynamic_attention:
+        config.dynamic_attention = True
+
+    config.visualization = True
+    num_labels = 3129
+
+    model = VILBertForVLTasks.from_pretrained(
+            args.from_pretrained, config=config, num_labels=num_labels, default_gpu=default_gpu
+        )
+
+    tokenizer = BertTokenizer.from_pretrained(
+            args.bert_model, do_lower_case=args.do_lower_case
+        )
+    tokenizer.add_special_tokens({'additional_special_tokens' : x for x in ['visible', 'subjective', 'story', 'meta', 'irrelevant', 'action']})
+
+    return model, tokenizer
+
+'''
+#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_##_#_#_#_#_#_#_#_#_#_#_#
+#                         PREDICTION                             #
+#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_##_#_#_#_#_#_#_#_#_#_#_#
+'''
+def prediction(tokens_batch, img_info_and_features, model):
+    batch_segments = []
+    batch_input_masks = []
+    for batch_ix, tokens in enumerate(tokens_batch):
+        segment_ids = [0] * len(tokens)
+        cur_id = 0
+        # for i in range(1, len(segment_ids)):
+        #     segment_ids[i] = cur_id
+        #     cur_id = (tokens[i] == 102)
+        input_mask = [1] * len(tokens)
+
+        #increment segment id after every 102 token
+        max_length = 76
+        if len(tokens) < max_length:
+            # Note here we pad in front of the sentence
+            padding = [0] * (max_length - len(tokens))
+            tokens_batch[batch_ix] = tokens + padding
+
+            input_mask += padding
+            segment_ids += padding
+        batch_segments.append(segment_ids)
+        batch_input_masks.append(input_mask)
+    
+    text = torch.from_numpy(np.array(tokens_batch, dtype=np.int)).cuda()
+    input_mask = torch.from_numpy(np.array(batch_input_masks, dtype=np.int)).cuda()
+    segment_ids = torch.from_numpy(np.array(batch_segments, dtype=np.int)).cuda()
+
+    img_features = [torch.from_numpy(x['features']).cuda() for x in img_info_and_features]
+    # print(img_features)
+    # exit()
+    infos = img_info_and_features
+    num_image = len(infos)
+
+    feature_list = []
+    image_location_list = []
+    image_mask_list = []
+
+    for i in range(num_image):
+        image_w = infos[i]['image_width']
+        image_h = infos[i]['image_height']
+        feature = img_features[i]
+        num_boxes = feature.shape[0]
+
+        g_feat = torch.sum(feature, dim=0) / num_boxes
+        num_boxes = num_boxes + 1
+        feature = torch.cat([g_feat.view(1,-1), feature], dim=0)
+        boxes = infos[i]['bbox']
+        image_location = np.zeros((boxes.shape[0], 5), dtype=np.float32)
+        image_location[:,:4] = boxes
+        image_location[:,4] = (image_location[:,3] - image_location[:,1]) * (image_location[:,2] - image_location[:,0]) / (float(image_w) * float(image_h))
+        image_location[:,0] = image_location[:,0] / float(image_w)
+        image_location[:,1] = image_location[:,1] / float(image_h)
+        image_location[:,2] = image_location[:,2] / float(image_w)
+        image_location[:,3] = image_location[:,3] / float(image_h)
+        g_location = np.array([0,0,1,1,1])
+        image_location = np.concatenate([np.expand_dims(g_location, axis=0), image_location], axis=0)
+        image_mask = [1] * (int(num_boxes))
+
+        feature_list.append(feature)
+        image_location_list.append(torch.tensor(image_location))
+        image_mask_list.append(torch.tensor(image_mask))
+
+    img_features = torch.stack(feature_list, dim=0).float().cuda()
+    spatials = torch.stack(image_location_list, dim=0).float().cuda()
+    image_mask = torch.stack(image_mask_list, dim=0).byte().cuda()
+    co_attention_mask = torch.zeros((num_image, num_boxes, max_length)).cuda()
+
+    vil_prediction, vil_prediction_gqa, vil_logit, vil_binary_prediction, \
+    vil_tri_prediction, vision_prediction, vision_logit, linguisic_prediction,\
+    linguistic_logits, attn_data_list = model(text, img_features, spatials,
+                                            segment_ids, input_mask, image_mask, co_attention_mask)
+
+    return (vil_prediction, vil_prediction_gqa, vil_logit,
+            vil_binary_prediction, vil_tri_prediction, vision_prediction,
+            vision_logit, linguisic_prediction,linguistic_logits, attn_data_list)
+
+def get_label_and_caption(reference_data, url):
+    coherence_labels = ['Visible', 'Subjective', 'Action', \
+                            'Story', 'Meta', 'Irrelevant']
+    with open(reference_data) as ref_file:
+        ref_file.readline()
+        for i, line in enumerate(ref_file):
+            data_row = line.split('\t')
+            if url == data_row[1].strip():
+                ref_caption = data_row[0].strip()
+                ref_label = [int(x) for x in data_row[2:8]].index(1)
+                ref_label = coherence_labels[ref_label].lower()
+                return ref_caption, ref_label
+
+def encode(tokenizer, ref_caption, ref_label, gen_caption, gen_label):
+    start_token = 101
+    sep_token = 102
+
+    return [start_token] + tokenizer.encode(ref_caption) + [sep_token] + \
+        tokenizer.encode(gen_caption) + [sep_token] + tokenizer.encode(ref_label) + \
+        [sep_token] + tokenizer.encode(gen_label) + [sep_token]
+
+def get_batch(start_ix, batch_size, data, feature_dir, tokenizer):
+    caption_tokens = []
+    info_and_features = []
+    caption_scores = []
+    for data_point in data[start_ix: start_ix + batch_size]:
+        ref_caption, ref_label = data_point[0]
+        info_file_ix, gen_caption, gen_label, caption_score = data_point[1]
+
+        info_and_features.append(np.load('{}/{:08d}.npy'.format(feature_dir, info_file_ix), allow_pickle=True).item())
+        caption_tokens.append(encode(tokenizer, ref_caption, ref_label, gen_caption, gen_label))
+        caption_scores.append(caption_score)
+    return caption_tokens, info_and_features, caption_scores
+
+'''
+#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_##_#_#_#_#_#_#_#_#_#_#_#
+#                         MAIN METHOD                            #
+#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_#_##_#_#_#_#_#_#_#_#_#_#_#
+'''
+
+def count_parameters(model): 
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+def main(args):
+    # Initialize the feature extractor
+    # feature_extractor = FeatureExtractor()
+
+    # Initialize the model
+    print('Starting model initialization')
+    model, tokenizer = model_init()
+    print('Initialized model')
+
+    cuda = torch.cuda.is_available()
+    model = CaptionEvaluationModel(model, model_name=args.model_name, batch_size=4)
+    model.load_state_dict(torch.load(f'{args.model_name}.pt'))
+    model.eval()
+    print(model)
+    if cuda: model = model.cuda(0)
+
+    image_features = dict()
+    reference_data = []
+    generated_data = []
+    generated_scores = []
+
+    valid_images = set()
+
+    feature_dir = './data/test_features'
+    for i, img_feats in enumerate(os.listdir(feature_dir)):
+        if img_feats in ['.', '..']:
+            continue
+        row_num = int(img_feats.split('.')[0])
+        valid_images.add(row_num)
+    
+    test_file = open('./data/testset/test_ref.txt')
+    ref_captions = [x.strip() for x in test_file.read().split('\n')]
+    test_file.close()
+
+    for file_name in os.listdir('./data/testset'):
+        if os.path.isdir(f'./data/testset/{file_name}'):
+            continue
+        if file_name == 'test_ref.txt':
+            continue
+
+        result_file = open('./data/test_results/{}'.format(file_name.split('.')[0]), 'w')
+        ref_label = 'visible'
+        gen_label = file_name.split('_')[-1].split('.')[0].strip()
+
+        if gen_label == 'agnostic':
+            ref_label = gen_label = '[UNK]'
+        elif gen_label == 'BUTD' or gen_label == 'true':
+            print(f'turning the label to true: {gen_label}')
+            gen_label = 'visible'
+        elif gen_label == 'subj':
+            gen_label = 'subjective'
+        average_score = 0
+        count = 0
+        with open(f'./data/testset/{file_name}') as gen_caption_file:
+            for i, gen_caption in enumerate(gen_caption_file):
+                if gen_caption.strip() == "":
+                    continue
+                if i not in valid_images:
+                    continue
+                count += 1
+                text_inp = [encode(tokenizer, ref_captions[i], ref_label, gen_caption.strip(), gen_label)]
+                # text_inp = [encode(tokenizer, 'close-up of pink flowers', 'visible', 'first flower of the year', 'story')]
+                image_features = [np.load('./data/test_features/{:08d}.npy'.format(i), allow_pickle=True).item()]
+                # image_features = [np.load('./data/poster_features/main_img.npy', allow_pickle=True).item()]
+                # predicted_score = torch.sigmoid(prediction(text_inp, image_features, model)[8][:, 0].view(-1))
+                # print(text_inp, len(image_features))
+                predicted_score = model(text_inp, image_features).view(-1)
+                # print(predicted_score.data)
+                # exit()
+                result_line = f'{ref_captions[i]} | {gen_caption} | {ref_label} | {gen_label}: {float(predicted_score.data)}'
+                average_score += float(predicted_score.data)
+                # print(result_line, i)
+                result_file.write(f'{result_line}\n')
+        result_file.close()
+        print(f'Total count: {count}')
+        print(f'{file_name}, {average_score/count}')
+        print('****************************************')
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument("model_name", help="model file path ending with the extension '.pt'.")
+    args = parser.parse_args()
+    main(args)
