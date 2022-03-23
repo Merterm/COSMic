@@ -10,9 +10,8 @@ coherence label for each pair:
 * Visible: the caption is true just by looking at the picture. Restatement relation in Prasad et al. (2008a).
 * Subjective: the captions is the matter of opinion. Evaluation relation in Hobbs (1985).
 * Story: text and image work like story and illustration. Occasion relation in Hobbs (1985).
-After the annotator selects a specific coherence label from the above, we ask them to rate the quality of the captions, given the label, on a scale of 1 to
-5. We use these annotations as training data for our coherence-aware captioning metric, COSMic. We call this data we annotated RaCCoon (Ratings for
-Conceptual Caption).
+
+After the annotator selects a specific coherence label from the above, we ask them to rate the quality of the captions, given the label, on a scale of 1 to 5. We use these annotations as training data for our coherence-aware captioning metric, COSMic. We call this data we annotated RaCCoon (Ratings for Conceptual Caption).
 
 ## COIN
 OpenImages Ground Truth Captions To create an out of domain test set we asked our annotators to write Visible captions for 1,000 images from the OpenImages dataset (Kuznetsova et al.,
