@@ -14,5 +14,4 @@ coherence label for each pair:
 After the annotator selects a specific coherence label from the above, we ask them to rate the quality of the captions, given the label, on a scale of 1 to 5. We use these annotations as training data for our coherence-aware captioning metric, COSMic. We call this data we annotated RaCCoon (Ratings for Conceptual Caption).
 
 ## COIN
-OpenImages Ground Truth Captions To create an out of domain test set we asked our annotators to write Visible captions for 1,000 images from the OpenImages dataset (Kuznetsova et al.,
-2020a). We call this dataset COIN (Corpus of OpenImages with Natural descriptions). 
+To create an out of domain test set we asked our annotators to write Visible captions for 1,000 images from the OpenImages dataset (Kuznetsova et al., 2020a). We call this dataset COIN (Corpus of OpenImages with Natural descriptions). 
